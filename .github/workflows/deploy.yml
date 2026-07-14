@@ -15,8 +15,24 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Build temporary deploy config with bindings
+        shell: bash
+        env:
+          CONFIG_KV_NAMESPACE_ID: ${{ secrets.CONFIG_KV_NAMESPACE_ID }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${CONFIG_KV_NAMESPACE_ID:-}" ]]; then
+            echo "Missing required GitHub secret: CONFIG_KV_NAMESPACE_ID"
+            exit 1
+          fi
+
+          cp wrangler.toml .wrangler-ci.toml
+          printf '\n[[kv_namespaces]]\nbinding = "CONFIG_KV"\nid = "%s"\n' "${CONFIG_KV_NAMESPACE_ID}" >> .wrangler-ci.toml
+
       - name: Deploy with Wrangler
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy --config .wrangler-ci.toml --keep-vars

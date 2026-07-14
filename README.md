@@ -186,8 +186,10 @@ Add these repository secrets in GitHub:
 
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
+- `CONFIG_KV_NAMESPACE_ID` (Cloudflare KV namespace id bound as `CONFIG_KV`)
 
 The workflow uses `cloudflare/wrangler-action@v3` to deploy.
+It generates a temporary `.wrangler-ci.toml` at runtime so deploys include the KV binding and do not wipe bindings.
 
 ## Notes
 
