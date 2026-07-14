@@ -2,4 +2,9 @@ name = "cf-wp-updates-proxy"
 main = "src/index.js"
 compatibility_date = "2024-03-20"
 
-# Note: Do NOT put your GITHUB_PAT here. Secrets are managed separately.
+# Note: Do NOT put GitHub PAT values here. Secrets are managed separately.
+
+[[kv_namespaces]]
+binding = "CONFIG_KV"
+id = "YOUR_KV_NAMESPACE_ID"
+preview_id = "YOUR_KV_NAMESPACE_ID"

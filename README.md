@@ -2,6 +2,8 @@
 
 Cloudflare Worker that proxies GitHub release metadata for WordPress update checks.
 
+This worker supports multiple plugins (public and private) using a routing map stored in Cloudflare KV.
+
 ## Project structure
 
 - `src/index.js`: Worker entrypoint and proxy logic.
@@ -22,17 +24,55 @@ npx wrangler login
 
 This opens a browser and links Wrangler to your Cloudflare account.
 
-## 3) Store secrets securely
+## 3) Create and bind KV namespace
 
-Set your GitHub PAT in Cloudflare as a Worker secret:
+Create a Cloudflare KV namespace (for example `WP_UPDATES_CONFIG`) and bind it to this Worker as `CONFIG_KV`.
 
-```bash
-npx wrangler secret put GITHUB_PAT
+In `wrangler.toml`, set your real namespace ID:
+
+```toml
+[[kv_namespaces]]
+binding = "CONFIG_KV"
+id = "YOUR_KV_NAMESPACE_ID"
+preview_id = "YOUR_KV_NAMESPACE_ID"
 ```
 
-Paste your token when prompted.
+## 4) Add routing map to KV
 
-## 4) Deploy from terminal
+Create a KV key named `routes` with JSON content like:
+
+```json
+{
+  "my-private-plugin": {
+    "owner": "your-org",
+    "repo": "private-plugin-repo",
+    "tokenKey": "GITHUB_PAT_MY_PRIVATE_PLUGIN",
+    "isPrivate": true
+  },
+  "my-public-plugin": {
+    "owner": "your-org",
+    "repo": "public-plugin-repo",
+    "tokenKey": null,
+    "isPrivate": false
+  }
+}
+```
+
+You can manage this from the Cloudflare dashboard without changing repository code.
+
+## 5) Store secrets securely
+
+For each private plugin, store a matching Worker secret in Cloudflare.
+
+Example for the `tokenKey` above:
+
+```bash
+npx wrangler secret put GITHUB_PAT_MY_PRIVATE_PLUGIN
+```
+
+Public plugins can use `tokenKey: null` with `isPrivate: false`.
+
+## 6) Deploy from terminal
 
 ```bash
 npx wrangler deploy
@@ -42,18 +82,24 @@ Wrangler outputs your Worker URL, for example:
 
 `https://cf-wp-updates-proxy.<your-subdomain>.workers.dev`
 
-## 5) Query the proxy
+## 7) Query the proxy
 
-Use `owner` and `repo` query params:
+Manifest endpoint:
 
 ```text
-GET /?owner=<github-owner>&repo=<github-repo>
+GET /<slug>/updates.json
+```
+
+Download endpoint (generated in manifest automatically):
+
+```text
+GET /<slug>/download/<tag>/<filename>
 ```
 
 Example:
 
 ```text
-https://cf-wp-updates-proxy.<your-subdomain>.workers.dev/?owner=webmultipliers&repo=cf-wp-updates-proxy
+https://cf-wp-updates-proxy.<your-subdomain>.workers.dev/my-private-plugin/updates.json
 ```
 
 ## GitHub Actions deployment
@@ -69,6 +115,7 @@ The workflow uses `cloudflare/wrangler-action@v3` to deploy.
 
 ## Notes
 
-- Keep `GITHUB_PAT` out of source files and `wrangler.toml`.
-- `GITHUB_PAT` is a Worker secret stored in Cloudflare (set with `wrangler secret put`), not a GitHub repository secret.
+- Keep all GitHub PAT values out of source files and `wrangler.toml`.
+- Use one secret per private plugin (`tokenKey` in the KV `routes` JSON), stored with `wrangler secret put`.
+- Plugin additions/changes are data updates in KV, not code changes.
 - The Worker only accepts `GET` requests.

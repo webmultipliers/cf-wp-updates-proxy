@@ -6,59 +6,174 @@ function json(data, status = 200, extraHeaders = {}) {
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
+      "access-control-allow-origin": "*",
       ...extraHeaders,
     },
   });
 }
 
-function getRepoTarget(url) {
-  const owner = url.searchParams.get("owner");
-  const repo = url.searchParams.get("repo");
+function buildGithubHeaders(config, env) {
+  const headers = {
+    "user-agent": "Cloudflare-Worker-WP-Updater",
+    accept: "application/vnd.github+json",
+  };
 
-  if (!owner || !repo) {
-    return { error: "Missing required query params: owner and repo" };
+  if (config.tokenKey && env[config.tokenKey]) {
+    headers.authorization = `Bearer ${env[config.tokenKey]}`;
   }
 
-  return { owner, repo };
+  return headers;
 }
 
-async function fetchReleases(owner, repo, token) {
-  const releaseUrl = `${GITHUB_API}/repos/${owner}/${repo}/releases?per_page=1`;
+function parseRoute(url) {
+  const pathParts = url.pathname.split("/").filter(Boolean);
+  if (pathParts.length < 2) {
+    return { error: "Invalid request format. Expected /<slug>/<action>" };
+  }
 
-  const releaseResp = await fetch(releaseUrl, {
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: "application/vnd.github+json",
-      "user-agent": "cf-wp-updates-proxy",
-    },
-  });
+  const slug = pathParts[0];
+  const action = pathParts[1];
+  return { slug, action, pathParts };
+}
 
-  if (!releaseResp.ok) {
-    const details = await releaseResp.text();
+async function fetchJson(url, headers) {
+  const resp = await fetch(url, { headers });
+  if (!resp.ok) {
     return {
-      error: `GitHub API error (${releaseResp.status})`,
-      details,
-      status: releaseResp.status,
+      ok: false,
+      status: resp.status,
+      text: await resp.text(),
     };
   }
 
-  const releases = await releaseResp.json();
-  const latest = Array.isArray(releases) ? releases[0] : null;
+  return {
+    ok: true,
+    status: resp.status,
+    data: await resp.json(),
+  };
+}
 
-  if (!latest) {
-    return { error: "No releases found for repository", status: 404 };
+async function getRoutingMap(env) {
+  if (!env.CONFIG_KV || typeof env.CONFIG_KV.get !== "function") {
+    return {
+      error: "CONFIG_KV binding is missing. Bind your KV namespace as CONFIG_KV.",
+      status: 500,
+    };
   }
 
-  const zipball = latest.assets?.find((asset) => asset.name.endsWith(".zip"));
+  const routes = await env.CONFIG_KV.get("routes", { type: "json" });
+  if (!routes || typeof routes !== "object") {
+    return {
+      error: "System routing configuration missing or invalid in KV key 'routes'.",
+      status: 500,
+    };
+  }
 
-  return {
-    version: latest.tag_name,
-    requires: "6.0",
-    tested: "6.6",
-    package: zipball?.browser_download_url || latest.zipball_url,
-    last_updated: latest.published_at,
-    homepage: `https://github.com/${owner}/${repo}`,
-  };
+  return { routes };
+}
+
+async function handleUpdatesJson(originUrl, config, headers, slug) {
+  const latestUrl = `${GITHUB_API}/repos/${config.owner}/${config.repo}/releases/latest`;
+  const latestResp = await fetchJson(latestUrl, headers);
+
+  if (!latestResp.ok) {
+    return json(
+      { error: `Failed to fetch latest release`, details: latestResp.text },
+      latestResp.status,
+    );
+  }
+
+  const releaseData = latestResp.data;
+  const manifestAsset = releaseData.assets?.find((asset) => asset.name === "updates.json");
+
+  if (!manifestAsset) {
+    return json({ error: "Manifest not found in release" }, 404);
+  }
+
+  const manifestResp = await fetch(manifestAsset.url, {
+    headers: {
+      ...headers,
+      accept: "application/octet-stream",
+    },
+    redirect: "follow",
+  });
+
+  if (!manifestResp.ok) {
+    return json(
+      { error: "Failed to fetch manifest", details: await manifestResp.text() },
+      manifestResp.status,
+    );
+  }
+
+  const manifest = await manifestResp.json();
+  const tag = releaseData.tag_name;
+
+  if (Array.isArray(manifest.packages)) {
+    manifest.packages = manifest.packages.map((pkg) => {
+      const currentPackage = typeof pkg.package === "string" ? pkg.package : "";
+      const filename = currentPackage.split("/").pop();
+
+      if (!filename) {
+        return pkg;
+      }
+
+      return {
+        ...pkg,
+        package: `${originUrl.origin}/${slug}/download/${tag}/${filename}`,
+      };
+    });
+  }
+
+  return json(manifest);
+}
+
+async function handleDownload(pathParts, config, headers) {
+  if (pathParts.length < 4) {
+    return json({ error: "Invalid download endpoint." }, 400);
+  }
+
+  const tag = pathParts[2];
+  const filename = pathParts.slice(3).join("/");
+
+  const releaseByTagUrl = `${GITHUB_API}/repos/${config.owner}/${config.repo}/releases/tags/${encodeURIComponent(tag)}`;
+  const releaseResp = await fetchJson(releaseByTagUrl, headers);
+
+  if (!releaseResp.ok) {
+    return json({ error: "Release not found", details: releaseResp.text }, 404);
+  }
+
+  const releaseData = releaseResp.data;
+  const zipAsset = releaseData.assets?.find((asset) => asset.name === filename);
+
+  if (!zipAsset) {
+    return json({ error: "Asset not found" }, 404);
+  }
+
+  const assetResp = await fetch(zipAsset.url, {
+    method: "GET",
+    headers: {
+      ...headers,
+      accept: "application/octet-stream",
+    },
+    redirect: "manual",
+  });
+
+  if (assetResp.status === 301 || assetResp.status === 302) {
+    const location = assetResp.headers.get("location");
+    if (!location) {
+      return json({ error: "Missing redirect location from GitHub asset" }, 502);
+    }
+
+    return new Response(null, {
+      status: assetResp.status,
+      headers: {
+        location,
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  return json({ error: "Failed to fetch asset redirect." }, 500);
 }
 
 export default {
@@ -67,24 +182,40 @@ export default {
       return json({ error: "Method not allowed" }, 405, { allow: "GET" });
     }
 
-    const token = env.GITHUB_PAT;
-    if (!token) {
-      return json({ error: "Server misconfiguration: GITHUB_PAT missing" }, 500);
-    }
-
     const url = new URL(request.url);
-    const target = getRepoTarget(url);
+    const parsed = parseRoute(url);
 
-    if (target.error) {
-      return json({ error: target.error }, 400);
+    if (parsed.error) {
+      return json({ error: parsed.error }, 400);
     }
 
-    const result = await fetchReleases(target.owner, target.repo, token);
-
-    if (result.error) {
-      return json({ error: result.error, details: result.details }, result.status || 500);
+    const routingResult = await getRoutingMap(env);
+    if (routingResult.error) {
+      return json({ error: routingResult.error }, routingResult.status || 500);
     }
 
-    return json(result);
+    const config = routingResult.routes[parsed.slug];
+    if (!config) {
+      return json({ error: "Plugin routing not found." }, 404);
+    }
+
+    if (config.isPrivate && (!config.tokenKey || !env[config.tokenKey])) {
+      return json(
+        { error: `Missing secret for private plugin: ${config.tokenKey || "undefined tokenKey"}` },
+        500,
+      );
+    }
+
+    const headers = buildGithubHeaders(config, env);
+
+    if (parsed.action === "updates.json") {
+      return handleUpdatesJson(url, config, headers, parsed.slug);
+    }
+
+    if (parsed.action === "download") {
+      return handleDownload(parsed.pathParts, config, headers);
+    }
+
+    return json({ error: "Invalid endpoint." }, 400);
   },
 };
