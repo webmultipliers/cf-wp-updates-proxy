@@ -1,6 +1,6 @@
 const GITHUB_API = "https://api.github.com";
 const DEFAULT_MANIFEST_CACHE_TTL_SECONDS = 6 * 60 * 60;
-const DEFAULT_DOWNLOAD_REDIRECT_CACHE_TTL_SECONDS = 15 * 60;
+const DEFAULT_DOWNLOAD_CACHE_TTL_SECONDS = 24 * 60 * 60;
 
 function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
@@ -14,23 +14,10 @@ function json(data, status = 200, extraHeaders = {}) {
   });
 }
 
-function html(body, status = 200) {
-  return new Response(body, {
-    status,
-    headers: {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": "no-store",
-    },
-  });
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+function sanitizeFilename(filename) {
+  return String(filename)
+    .replace(/[\x00-\x1f\x7f]/g, "")
+    .replaceAll('"', "");
 }
 
 function buildGithubHeaders(config, env) {
@@ -39,8 +26,9 @@ function buildGithubHeaders(config, env) {
     accept: "application/vnd.github+json",
   };
 
-  if (config.tokenKey && env[config.tokenKey]) {
-    headers.authorization = `Bearer ${env[config.tokenKey]}`;
+  const token = (config.tokenKey && env[config.tokenKey]) || env.GITHUB_PAT_DEFAULT;
+  if (token) {
+    headers.authorization = `Bearer ${token}`;
   }
 
   return headers;
@@ -127,14 +115,10 @@ function getCacheBypassState(env, request, url) {
 }
 
 function isCacheableStatus(status) {
-  if (status >= 200 && status < 300) {
-    return true;
-  }
-
-  return status === 301 || status === 302 || status === 307 || status === 308;
+  return status >= 200 && status < 300;
 }
 
-async function withCache(cacheKey, ttlSeconds, computeResponse, bypassCache = false) {
+async function withCache(cacheKey, ttlSeconds, computeResponse, bypassCache, ctx) {
   const cache = caches.default;
   if (!bypassCache) {
     const cached = await cache.match(cacheKey);
@@ -144,16 +128,16 @@ async function withCache(cacheKey, ttlSeconds, computeResponse, bypassCache = fa
   }
 
   const response = await computeResponse();
-  if (!bypassCache && isCacheableStatus(response.status)) {
+  if (isCacheableStatus(response.status)) {
     const cloned = response.clone();
     cloned.headers.set("cache-control", `public, max-age=${ttlSeconds}`);
-    await cache.put(cacheKey, cloned);
+    ctx.waitUntil(cache.put(cacheKey, cloned));
   }
 
   return response;
 }
 
-async function handleUpdatesJson(originUrl, config, headers, slug, env, bypassCache) {
+async function handleUpdatesJson(originUrl, config, headers, slug, env, bypassCache, ctx) {
   const manifestTtl = parsePositiveInt(
     env.MANIFEST_CACHE_TTL_SECONDS,
     DEFAULT_MANIFEST_CACHE_TTL_SECONDS,
@@ -165,10 +149,8 @@ async function handleUpdatesJson(originUrl, config, headers, slug, env, bypassCa
     const latestResp = await fetchJson(latestUrl, headers);
 
     if (!latestResp.ok) {
-      return json(
-        { error: `Failed to fetch latest release`, details: latestResp.text },
-        latestResp.status,
-      );
+      console.error(`Failed to fetch latest release for ${slug}: ${latestResp.status} ${latestResp.text}`);
+      return json({ error: "Failed to fetch latest release." }, latestResp.status);
     }
 
     const releaseData = latestResp.data;
@@ -187,10 +169,8 @@ async function handleUpdatesJson(originUrl, config, headers, slug, env, bypassCa
     });
 
     if (!manifestResp.ok) {
-      return json(
-        { error: "Failed to fetch manifest", details: await manifestResp.text() },
-        manifestResp.status,
-      );
+      console.error(`Failed to fetch manifest for ${slug}: ${manifestResp.status} ${await manifestResp.text()}`);
+      return json({ error: "Failed to fetch manifest." }, manifestResp.status);
     }
 
     const manifest = await manifestResp.json();
@@ -213,32 +193,33 @@ async function handleUpdatesJson(originUrl, config, headers, slug, env, bypassCa
     }
 
     return json(manifest, 200, { "cache-control": `public, max-age=${manifestTtl}` });
-  }, bypassCache);
+  }, bypassCache, ctx);
 }
 
-async function handleDownload(originUrl, pathParts, config, headers, env, bypassCache) {
+async function handleDownload(originUrl, pathParts, config, headers, env, bypassCache, ctx) {
   if (pathParts.length < 4) {
     return json({ error: "Invalid download endpoint." }, 400);
   }
 
   const tag = pathParts[2];
-  const filename = pathParts.slice(3).join("/");
-  const redirectTtl = parsePositiveInt(
-    env.DOWNLOAD_REDIRECT_CACHE_TTL_SECONDS,
-    DEFAULT_DOWNLOAD_REDIRECT_CACHE_TTL_SECONDS,
+  const filename = sanitizeFilename(pathParts.slice(3).join("/"));
+  const downloadTtl = parsePositiveInt(
+    env.DOWNLOAD_CACHE_TTL_SECONDS,
+    DEFAULT_DOWNLOAD_CACHE_TTL_SECONDS,
   );
   const cacheKey = new Request(`${originUrl.origin}/${pathParts.join("/")}`, { method: "GET" });
 
-  return withCache(cacheKey, redirectTtl, async () => {
+  return withCache(cacheKey, downloadTtl, async () => {
     const releaseByTagUrl = `${GITHUB_API}/repos/${config.owner}/${config.repo}/releases/tags/${encodeURIComponent(tag)}`;
     const releaseResp = await fetchJson(releaseByTagUrl, headers);
 
     if (!releaseResp.ok) {
+      console.error(`Failed to fetch release ${tag} for download: ${releaseResp.status} ${releaseResp.text}`);
       if (releaseResp.status === 404) {
-        return json({ error: "Release not found", details: releaseResp.text }, 404);
+        return json({ error: "Release not found" }, 404);
       }
 
-      return json({ error: "Failed to fetch release by tag", details: releaseResp.text }, releaseResp.status);
+      return json({ error: "Failed to fetch release by tag." }, releaseResp.status);
     }
 
     const releaseData = releaseResp.data;
@@ -249,37 +230,30 @@ async function handleDownload(originUrl, pathParts, config, headers, env, bypass
     }
 
     const assetResp = await fetch(zipAsset.url, {
-      method: "GET",
-      headers: {
-        ...headers,
-        accept: "application/octet-stream",
-      },
-      redirect: "manual",
+      headers: { ...headers, accept: "application/octet-stream" },
+      redirect: "follow",
     });
 
-    if (assetResp.status === 301 || assetResp.status === 302) {
-      const location = assetResp.headers.get("location");
-      if (!location) {
-        return json({ error: "Missing redirect location from GitHub asset" }, 502);
-      }
-
-      return new Response(null, {
-        status: assetResp.status,
-        headers: {
-          location,
-          "cache-control": `public, max-age=${redirectTtl}`,
-        },
-      });
+    if (!assetResp.ok) {
+      console.error(`Failed to fetch asset ${filename} for ${tag}: ${assetResp.status}`);
+      return json({ error: "Failed to fetch asset." }, 502);
     }
 
-    return json({ error: "Failed to fetch asset redirect." }, 500);
-  }, bypassCache);
+    return new Response(assetResp.body, {
+      status: 200,
+      headers: {
+        "content-type": "application/zip",
+        "content-disposition": `attachment; filename="${filename}"`,
+        "cache-control": `public, max-age=${downloadTtl}`,
+      },
+    });
+  }, bypassCache, ctx);
 }
 
 function buildPluginSummary(originUrl, slug, config, env) {
-  const tokenConfigured = Boolean(config.tokenKey && env[config.tokenKey]);
+  const tokenConfigured = Boolean((config.tokenKey && env[config.tokenKey]) || env.GITHUB_PAT_DEFAULT);
   const isPrivate = Boolean(config.isPrivate);
-  const preflightHealthy = !isPrivate || tokenConfigured;
+  const preflightHealthy = !isPrivate || Boolean(config.tokenKey && env[config.tokenKey]);
 
   return {
     slug,
@@ -425,229 +399,22 @@ async function buildPluginStatus(originUrl, slug, config, env, includeRemoteChec
   };
 }
 
-async function buildServiceStatus(originUrl, env, includeRemoteChecks = true) {
-  const routingResult = await getRoutingMap(env);
-  if (routingResult.error) {
-    return {
-      ok: false,
-      service: "cf-wp-updates-proxy",
-      generatedAt: new Date().toISOString(),
-      error: routingResult.error,
-      statusCode: routingResult.status || 500,
-      routesCount: 0,
-      plugins: [],
-    };
-  }
-
-  const routeEntries = Object.entries(routingResult.routes);
-  const plugins = await Promise.all(
-    routeEntries.map(([slug, config]) => buildPluginStatus(originUrl, slug, config, env, includeRemoteChecks)),
-  );
-  const healthyCount = plugins.filter((plugin) => plugin.healthy).length;
-
-  return {
-    ok: healthyCount === plugins.length,
-    service: "cf-wp-updates-proxy",
-    generatedAt: new Date().toISOString(),
-    routesCount: plugins.length,
-    healthyCount,
-    unhealthyCount: plugins.length - healthyCount,
-    mode: includeRemoteChecks ? "remote" : "preflight",
-    plugins,
-    docs: {
-      statusPage: `${originUrl.origin}/status`,
-      statusJson: `${originUrl.origin}/status.json`,
-      updatesPattern: `${originUrl.origin}/<slug>/updates.json`,
-      downloadPattern: `${originUrl.origin}/<slug>/download/<tag>/<filename>`,
-    },
-  };
-}
-
-function renderStatusPage(report) {
-  const rows = report.plugins
-    .map((plugin) => {
-      const state = plugin.healthy ? "healthy" : "degraded";
-      const latestTag = plugin.checks?.latestRelease?.tag || "-";
-      const manifestVersion = plugin.checks?.manifest?.version || "-";
-      const pkgCount = plugin.checks?.manifest?.packageCount ?? 0;
-      const notes = (plugin.problems || []).join(" ") || "OK";
-
-      return `
-        <tr>
-          <td>${escapeHtml(plugin.slug)}</td>
-          <td>${escapeHtml(`${plugin.owner}/${plugin.repo}`)}</td>
-          <td><span class="pill ${state}">${escapeHtml(state)}</span></td>
-          <td>${escapeHtml(latestTag)}</td>
-          <td>${escapeHtml(manifestVersion)}</td>
-          <td>${escapeHtml(String(pkgCount))}</td>
-          <td>${escapeHtml(notes)}</td>
-        </tr>
-      `;
-    })
-    .join("");
-
-  const summaryClass = report.ok ? "healthy" : "degraded";
-  const summaryText = report.ok ? "All plugin routes healthy" : "One or more plugin routes degraded";
-
-  return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>cf-wp-updates-proxy status</title>
-    <style>
-      :root {
-        --bg: #0f172a;
-        --panel: #111827;
-        --text: #e5e7eb;
-        --muted: #9ca3af;
-        --ok: #16a34a;
-        --bad: #dc2626;
-        --line: #1f2937;
-        --accent: #0ea5e9;
-      }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        font-family: ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif;
-        background: radial-gradient(circle at 10% 10%, #111827, #0b1220 55%, #050816);
-        color: var(--text);
-      }
-      .container {
-        max-width: 1100px;
-        margin: 0 auto;
-        padding: 32px 20px 48px;
-      }
-      h1 { margin: 0 0 10px; font-size: 30px; }
-      .muted { color: var(--muted); margin: 0 0 18px; }
-      .summary {
-        display: inline-flex;
-        align-items: center;
-        gap: 10px;
-        padding: 10px 14px;
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        background: var(--panel);
-        margin-bottom: 18px;
-      }
-      .dot {
-        width: 10px;
-        height: 10px;
-        border-radius: 999px;
-      }
-      .dot.healthy { background: var(--ok); }
-      .dot.degraded { background: var(--bad); }
-      table {
-        width: 100%;
-        border-collapse: collapse;
-        overflow: hidden;
-        border-radius: 12px;
-        border: 1px solid var(--line);
-        background: #0b1120cc;
-      }
-      th, td {
-        text-align: left;
-        padding: 12px;
-        border-bottom: 1px solid var(--line);
-        font-size: 14px;
-        vertical-align: top;
-      }
-      th {
-        color: var(--muted);
-        font-weight: 600;
-      }
-      tr:last-child td { border-bottom: 0; }
-      .pill {
-        border-radius: 999px;
-        padding: 4px 8px;
-        font-size: 12px;
-        border: 1px solid transparent;
-      }
-      .pill.healthy {
-        color: #86efac;
-        border-color: #166534;
-        background: #052e16;
-      }
-      .pill.degraded {
-        color: #fca5a5;
-        border-color: #7f1d1d;
-        background: #450a0a;
-      }
-      .links {
-        margin-top: 16px;
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-      }
-      a {
-        color: var(--accent);
-        text-decoration: none;
-      }
-      a:hover { text-decoration: underline; }
-      code {
-        color: #bfdbfe;
-      }
-    </style>
-  </head>
-  <body>
-    <main class="container">
-      <h1>cf-wp-updates-proxy status</h1>
-      <p class="muted">Self-diagnostics for route health, release resolution, and manifest delivery.</p>
-      <div class="summary">
-        <span class="dot ${summaryClass}"></span>
-        <strong>${escapeHtml(summaryText)}</strong>
-        <span class="muted">(${escapeHtml(String(report.healthyCount || 0))}/${escapeHtml(String(report.routesCount || 0))} healthy)</span>
-      </div>
-      <table>
-        <thead>
-          <tr>
-            <th>Slug</th>
-            <th>Repository</th>
-            <th>Status</th>
-            <th>Latest Tag</th>
-            <th>Manifest Version</th>
-            <th>Packages</th>
-            <th>Notes</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
-      <div class="links">
-        <a href="/status.json">Full JSON report</a>
-        <a href="/status.json?check=0">Preflight-only JSON</a>
-      </div>
-      <p class="muted">Generated at: <code>${escapeHtml(report.generatedAt || "-")}</code></p>
-    </main>
-  </body>
-</html>`;
-}
-
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method !== "GET") {
       return json({ error: "Method not allowed" }, 405, { allow: "GET" });
     }
 
     const url = new URL(request.url);
     if (url.pathname === "/") {
-      const includeRemoteChecks = url.searchParams.get("check") !== "0";
-      const report = await buildServiceStatus(url, env, includeRemoteChecks);
-      const statusCode = report.ok ? 200 : (report.statusCode || 503);
-      return html(renderStatusPage(report), statusCode);
-    }
-
-    if (url.pathname === "/status" || url.pathname === "/status/") {
-      const includeRemoteChecks = url.searchParams.get("check") !== "0";
-      const report = await buildServiceStatus(url, env, includeRemoteChecks);
-      const statusCode = report.ok ? 200 : (report.statusCode || 503);
-      return html(renderStatusPage(report), statusCode);
-    }
-
-    if (url.pathname === "/status.json") {
-      const includeRemoteChecks = url.searchParams.get("check") !== "0";
-      const report = await buildServiceStatus(url, env, includeRemoteChecks);
-      const statusCode = report.ok ? 200 : (report.statusCode || 503);
-      return json(report, statusCode);
+      return json({
+        service: "cf-wp-updates-proxy",
+        endpoints: {
+          updates: "/<slug>/updates.json",
+          download: "/<slug>/download/<tag>/<filename>",
+          status: "/<slug>/status.json",
+        },
+      });
     }
 
     const parsed = parseRoute(url);
@@ -690,11 +457,11 @@ export default {
     const bypassCache = bypassState.bypassCache;
 
     if (parsed.action === "updates.json") {
-      return handleUpdatesJson(url, config, headers, parsed.slug, env, bypassCache);
+      return handleUpdatesJson(url, config, headers, parsed.slug, env, bypassCache, ctx);
     }
 
     if (parsed.action === "download") {
-      return handleDownload(url, parsed.pathParts, config, headers, env, bypassCache);
+      return handleDownload(url, parsed.pathParts, config, headers, env, bypassCache, ctx);
     }
 
     return json({ error: "Invalid endpoint." }, 400);
