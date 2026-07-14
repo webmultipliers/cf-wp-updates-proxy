@@ -10,43 +10,106 @@ jobs:
   deploy:
     name: Deploy to Cloudflare
     runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Check required secrets are configured
         id: secret-check
-        shell: bash
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          if [[ -z "${CLOUDFLARE_API_TOKEN:-}" ]]; then
-            echo "::notice::Deploy skipped: repository secrets not configured (set CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CONFIG_KV_NAMESPACE_ID)."
+          if [[ -z "${CLOUDFLARE_API_TOKEN:-}" || -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]]; then
+            echo "::notice::Deploy skipped: set the CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID repository secrets to enable deploys."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build temporary deploy config with bindings
+      - name: Setup Node
         if: steps.secret-check.outputs.skip == 'false'
-        shell: bash
-        env:
-          CONFIG_KV_NAMESPACE_ID: ${{ secrets.CONFIG_KV_NAMESPACE_ID }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        if: steps.secret-check.outputs.skip == 'false'
+        run: npm install
+
+      - name: Resolve or create CONFIG_KV namespace
+        if: steps.secret-check.outputs.skip == 'false'
+        id: kv
         run: |
           set -euo pipefail
+          TITLE="${{ github.event.repository.name }}-CONFIG_KV"
 
-          if [[ -z "${CONFIG_KV_NAMESPACE_ID:-}" ]]; then
-            echo "Missing required GitHub secret: CONFIG_KV_NAMESPACE_ID"
-            exit 1
+          NS_LIST="$(npx wrangler kv namespace list 2>/dev/null || true)"
+          NS_ID="$(echo "$NS_LIST" | jq -r --arg title "$TITLE" '.[] | select(.title == $title) | .id' | head -n1)"
+
+          if [[ -z "${NS_ID:-}" || "$NS_ID" == "null" ]]; then
+            echo "No existing namespace titled '${TITLE}' found; creating it."
+            CREATE_OUT="$(npx wrangler kv namespace create "$TITLE" 2>&1)"
+            echo "$CREATE_OUT"
+            NS_ID="$(echo "$CREATE_OUT" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
           fi
 
+          [[ -n "${NS_ID:-}" ]] || { echo "::error::Failed to resolve or create the CONFIG_KV namespace."; exit 1; }
+
+          echo "Using CONFIG_KV namespace id: ${NS_ID}"
+          echo "id=${NS_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Sync routes from ROUTES_JSON repo variable
+        if: steps.secret-check.outputs.skip == 'false'
+        env:
+          ROUTES_JSON: ${{ vars.ROUTES_JSON }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${ROUTES_JSON:-}" ]]; then
+            echo "::warning::ROUTES_JSON repository variable is not set; the 'routes' KV key was left untouched. Every route will 404 or 500 until it's set."
+            exit 0
+          fi
+
+          echo "$ROUTES_JSON" | jq -e 'type == "object"' >/dev/null || { echo "::error::ROUTES_JSON repository variable is not valid JSON."; exit 1; }
+          echo "$ROUTES_JSON" | jq -c '.' > /tmp/routes.json
+          npx wrangler kv key put routes --namespace-id "${{ steps.kv.outputs.id }}" --remote --path /tmp/routes.json
+
+      - name: Sync GITHUB_PAT_DEFAULT worker secret
+        if: steps.secret-check.outputs.skip == 'false'
+        env:
+          GITHUB_PAT_DEFAULT: ${{ secrets.GITHUB_PAT_DEFAULT }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GITHUB_PAT_DEFAULT:-}" ]]; then
+            echo "::notice::GITHUB_PAT_DEFAULT repository secret is not set; public routes will call the GitHub API unauthenticated and may be rate-limited."
+            exit 0
+          fi
+          printf '%s' "$GITHUB_PAT_DEFAULT" | npx wrangler secret put GITHUB_PAT_DEFAULT
+
+      - name: Build temporary deploy config with bindings
+        if: steps.secret-check.outputs.skip == 'false'
+        env:
+          MANIFEST_CACHE_TTL_SECONDS: ${{ vars.MANIFEST_CACHE_TTL_SECONDS }}
+          DOWNLOAD_CACHE_TTL_SECONDS: ${{ vars.DOWNLOAD_CACHE_TTL_SECONDS }}
+          ALLOW_CACHE_BYPASS: ${{ vars.ALLOW_CACHE_BYPASS }}
+          CACHE_BYPASS_TOKEN: ${{ secrets.CACHE_BYPASS_TOKEN }}
+        run: |
+          set -euo pipefail
           cp wrangler.toml .wrangler-ci.toml
-          printf '\n[[kv_namespaces]]\nbinding = "CONFIG_KV"\nid = "%s"\n' "${CONFIG_KV_NAMESPACE_ID}" >> .wrangler-ci.toml
+          printf '\n[[kv_namespaces]]\nbinding = "CONFIG_KV"\nid = "%s"\n' "${{ steps.kv.outputs.id }}" >> .wrangler-ci.toml
+
+          # Optional operational vars, only if the matching repo var/secret is set.
+          # Unset ones fall through to the code defaults / whatever --keep-vars preserves.
+          VARS_BLOCK=""
+          [[ -n "${MANIFEST_CACHE_TTL_SECONDS:-}" ]] && VARS_BLOCK+="MANIFEST_CACHE_TTL_SECONDS = \"${MANIFEST_CACHE_TTL_SECONDS}\"\n"
+          [[ -n "${DOWNLOAD_CACHE_TTL_SECONDS:-}" ]] && VARS_BLOCK+="DOWNLOAD_CACHE_TTL_SECONDS = \"${DOWNLOAD_CACHE_TTL_SECONDS}\"\n"
+          [[ -n "${ALLOW_CACHE_BYPASS:-}" ]] && VARS_BLOCK+="ALLOW_CACHE_BYPASS = \"${ALLOW_CACHE_BYPASS}\"\n"
+          [[ -n "${CACHE_BYPASS_TOKEN:-}" ]] && VARS_BLOCK+="CACHE_BYPASS_TOKEN = \"${CACHE_BYPASS_TOKEN}\"\n"
+
+          if [[ -n "$VARS_BLOCK" ]]; then
+            printf '\n[vars]\n%b' "$VARS_BLOCK" >> .wrangler-ci.toml
+          fi
 
       - name: Deploy with Wrangler
         if: steps.secret-check.outputs.skip == 'false'
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy --config .wrangler-ci.toml --keep-vars
+        run: npx wrangler deploy --config .wrangler-ci.toml --keep-vars

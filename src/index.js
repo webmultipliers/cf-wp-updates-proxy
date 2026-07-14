@@ -14,6 +14,68 @@ function json(data, status = 200, extraHeaders = {}) {
   });
 }
 
+const HOME_PAGE_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>cf-wp-updates-proxy</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+        line-height: 1.5;
+      }
+      main {
+        max-width: 640px;
+        margin: 0 auto;
+        padding: 48px 20px;
+      }
+      h1 { font-size: 1.5rem; margin-bottom: 0.25em; }
+      .tagline { opacity: 0.75; margin-top: 0; }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.9em;
+        background: rgba(127, 127, 127, 0.15);
+        padding: 0.15em 0.4em;
+        border-radius: 4px;
+      }
+      table { border-collapse: collapse; width: 100%; margin: 1.5em 0; }
+      th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid rgba(127, 127, 127, 0.3); vertical-align: top; font-size: 0.92em; }
+      th { opacity: 0.7; font-weight: 600; }
+      footer { opacity: 0.6; font-size: 0.85em; margin-top: 2em; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>cf-wp-updates-proxy</h1>
+      <p class="tagline">Serves WordPress plugin update manifests and package downloads backed by GitHub Releases.</p>
+      <table>
+        <thead>
+          <tr><th>Endpoint</th><th>Purpose</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>GET /&lt;slug&gt;/updates.json</code></td><td>Update manifest for a configured route</td></tr>
+          <tr><td><code>GET /&lt;slug&gt;/download/&lt;tag&gt;/&lt;filename&gt;</code></td><td>Streamed package download</td></tr>
+          <tr><td><code>GET /&lt;slug&gt;/status.json</code></td><td>Per-route health check</td></tr>
+        </tbody>
+      </table>
+      <footer>This page lists endpoint patterns only — configured plugin slugs are not enumerated here. See this deployment's repository README for the full behavior contract and configuration reference.</footer>
+    </main>
+  </body>
+</html>`;
+
+function html(body, status = 200) {
+  return new Response(body, {
+    status,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "public, max-age=3600",
+    },
+  });
+}
+
 function sanitizeFilename(filename) {
   return String(filename)
     .replace(/[\x00-\x1f\x7f]/g, "")
@@ -407,14 +469,7 @@ export default {
 
     const url = new URL(request.url);
     if (url.pathname === "/") {
-      return json({
-        service: "cf-wp-updates-proxy",
-        endpoints: {
-          updates: "/<slug>/updates.json",
-          download: "/<slug>/download/<tag>/<filename>",
-          status: "/<slug>/status.json",
-        },
-      });
+      return html(HOME_PAGE_HTML);
     }
 
     const parsed = parseRoute(url);

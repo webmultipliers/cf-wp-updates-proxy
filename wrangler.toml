@@ -2,13 +2,16 @@ name = "cf-wp-updates-proxy"
 main = "src/index.js"
 compatibility_date = "2026-07-14"
 
-# This file intentionally has no bindings, vars, or secrets — configure the
-# deployed Worker outside of source control (Cloudflare dashboard, or the
-# temporary-config injection in .github/workflows/deploy.yml). Expected
-# runtime configuration:
+# This file intentionally has no bindings, vars, or secrets. The GitHub
+# Actions workflow in .github/workflows/deploy.yml provisions everything
+# else at deploy time from repository secrets/variables: it resolves or
+# creates the CONFIG_KV namespace, writes the ROUTES_JSON repo variable into
+# it, and injects the resulting binding into a temporary config. See the
+# README's Deployment section for the full list of repo secrets/variables.
 #
 # Bindings:
-#   CONFIG_KV        KV namespace holding the "routes" JSON key (required).
+#   CONFIG_KV        KV namespace holding the "routes" JSON key (required;
+#                    auto-provisioned by the deploy workflow).
 #
 # Vars (Settings -> Variables, or [vars] in a local-only config):
 #   MANIFEST_CACHE_TTL_SECONDS   default 21600 (6h)
@@ -18,5 +21,7 @@ compatibility_date = "2026-07-14"
 #
 # Secrets (wrangler secret put <NAME>):
 #   GITHUB_PAT_DEFAULT   shared token used when a route has no tokenKey
-#                        (strongly recommended for all deployments)
+#                        (strongly recommended; auto-synced by the deploy
+#                        workflow from the repo secret of the same name)
 #   GITHUB_PAT_*         per-route token named by that route's tokenKey
+#                        (set manually with `wrangler secret put`)
