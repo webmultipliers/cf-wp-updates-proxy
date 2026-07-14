@@ -1,0 +1,21 @@
+name: Deploy Worker
+
+"on":
+  push:
+    branches:
+      - main
+  workflow_dispatch: # Allows you to manually trigger a deploy from the GitHub UI
+
+jobs:
+  deploy:
+    name: Deploy to Cloudflare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy with Wrangler
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

@@ -1,0 +1,13 @@
+{
+	"name": "cf-wp-updates-proxy",
+	"version": "1.0.0",
+	"private": true,
+	"description": "Cloudflare Worker proxy for WordPress updates metadata via GitHub API",
+	"scripts": {
+		"dev": "wrangler dev",
+		"deploy": "wrangler deploy"
+	},
+	"devDependencies": {
+		"wrangler": "^4.25.0"
+	}
+}
