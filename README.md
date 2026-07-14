@@ -6,10 +6,10 @@ else. All configuration — which repos map to which slugs, tokens, cache
 TTLs — lives in Cloudflare KV, Worker secrets, and Worker vars. The source in
 `src/` is never edited to configure a deployment.
 
-This repository is a GitHub template. Click "Use this template," set a
-handful of repository secrets/variables, and push — the deploy workflow
-provisions the KV namespace and seeds its routing config for you; no manual
-Cloudflare dashboard step is required.
+This repository is designed to be forked. Fork it, set a handful of
+repository secrets/variables, and push — the deploy workflow provisions the
+KV namespace and seeds its routing config for you; no manual Cloudflare
+dashboard step is required.
 
 ## Behavior contract
 
@@ -58,14 +58,21 @@ never gets new content under the same filename.
 ### `GET /<slug>/status.json`
 
 Per-route health report. Does not require or expose fleet-wide data — each
-slug's health is queried independently.
+slug's health is queried independently. The response includes the route's
+`owner`/`repo`/`tokenKey` (name, not value) — this is configuration metadata,
+not a secret, and is consistent with the rest of this worker's threat model
+(slugs and downloads are already unauthenticated; see Operational
+requirements below).
 
 - **200** — route is healthy
 - **503** — route is degraded (see `problems[]` in the response body)
 - **404** — unknown slug
 
 Add `?check=0` to skip GitHub calls and return only preflight checks (KV
-config and secret presence). Never cached.
+config and secret presence) — never cached, since it makes no GitHub calls.
+Without it, the handler makes several authenticated GitHub API calls per
+request, so the response is cached for 60 seconds to bound how fast a known
+slug can be hit to burn through the configured PAT's rate limit.
 
 ### Cache bypass
 
@@ -88,7 +95,7 @@ curl -H "x-cache-bypass-token: <token>" \
 Every piece of configuration lives in this repository's GitHub Actions
 secrets/variables (Settings → Secrets and variables → Actions) — never in
 `src/` or `wrangler.toml`. The deploy workflow re-syncs KV and the default
-token from these on every push to `main`.
+token from these on every push to your deployment branch.
 
 ### Repository variables
 
@@ -107,10 +114,10 @@ token from these on every push to `main`.
 | `CLOUDFLARE_ACCOUNT_ID` | yes | Target Cloudflare account. |
 | `GITHUB_PAT_DEFAULT` | recommended | Shared GitHub token, auto-synced to the Worker's `GITHUB_PAT_DEFAULT` secret on every deploy. Used by any route with `tokenKey: null`. Without it, public routes call the GitHub API unauthenticated and share a 60/hr/IP rate limit across all Cloudflare customers. |
 | `GITHUB_PAT_<NAME>` | per private route | A private route's token. Its `tokenKey` in `ROUTES_JSON` must name a Worker secret set with this value — set it once with `wrangler secret put <NAME>` (see below; not auto-synced, since the workflow doesn't enumerate arbitrary secret names). |
-| `CACHE_BYPASS_TOKEN` | no | If set, synced as a Worker var and required as the `x-cache-bypass-token` header on bypass requests. Stored as a repo secret (not a variable) since it functions as a credential. |
+| `CACHE_BYPASS_TOKEN` | no | If set, auto-synced to the Worker's `CACHE_BYPASS_TOKEN` secret on every deploy and required as the `x-cache-bypass-token` header on bypass requests. Stored as a repo secret (not a variable) since it functions as a credential — the Worker reads it the same way regardless of whether it arrives as a var or a secret. |
 
 If `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID` aren't set, the workflow
-exits cleanly with a notice instead of failing — so the template deploys
+exits cleanly with a notice instead of failing — so a new fork deploys
 without a red X before you've configured anything. Any repo variable/secret
 left unset simply falls through to the Worker's built-in default.
 
@@ -184,20 +191,24 @@ clients.
 
 ## Deployment
 
-**Template flow (recommended, no Cloudflare dashboard step required):**
+**Fork flow (recommended, no Cloudflare dashboard step required):**
 
-1. Click "Use this template" to create your own repository.
-2. In the new repo's Settings → Secrets and variables → Actions, set:
+1. Fork this repository.
+2. In your fork's Settings → Secrets and variables → Actions, set:
    - Secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and
      (recommended) `GITHUB_PAT_DEFAULT`
    - Variables: `ROUTES_JSON` (your routing map — see schema above)
-3. Push to `main`. `.github/workflows/deploy.yml` then, on every run:
+3. Push to your fork's default deployment branch (`development` or `main` by
+  default in this workflow), or run the workflow manually via
+  `workflow_dispatch`. `.github/workflows/deploy.yml` then, on every run:
    - resolves or creates the `CONFIG_KV` namespace (titled
      `<repo-name>-CONFIG_KV`) — no id to look up or copy anywhere
    - writes `ROUTES_JSON` to its `routes` key
-   - syncs `GITHUB_PAT_DEFAULT` (and any optional cache vars/token you set)
-     to the Worker
    - deploys with the resulting binding
+   - syncs `GITHUB_PAT_DEFAULT` and `CACHE_BYPASS_TOKEN` (if set) to the
+     Worker as secrets — deliberately *after* the deploy step, since
+     `wrangler secret put` against a Worker that doesn't exist yet is
+     version-dependent behavior best avoided
 4. For a private route, add its `GITHUB_PAT_<NAME>` repo secret so the value
    exists, then set it on the Worker once with:
    `npx wrangler secret put GITHUB_PAT_<NAME>` (this one step isn't
@@ -205,8 +216,24 @@ clients.
    names your routes will reference).
 
 If `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID` aren't set yet, the
-workflow exits cleanly with a notice instead of failing, so the template
+workflow exits cleanly with a notice instead of failing, so a new fork
 deploys without a red X before you've configured anything.
+
+## Staying updated
+
+This distribution model is pull-based: upstream updates are available to your
+fork when you sync it.
+
+1. Open your fork on GitHub.
+2. Use the **Sync fork** button when GitHub shows your fork is behind.
+3. The sync commit lands on your default branch and triggers deploy.
+
+Because deployment identity lives outside git (repo secrets/variables, Worker
+secrets, and KV data), syncing code from upstream does not overwrite your
+deployment credentials.
+
+For breaking changes (for example, route schema changes or renamed env vars),
+check this repo's release notes and `CHANGELOG.md` before syncing.
 
 **Manual alternative** (bypassing the workflow entirely):
 
@@ -215,8 +242,17 @@ npm install
 npx wrangler kv namespace create CONFIG_KV
 # bind the resulting id to this Worker as CONFIG_KV in the dashboard,
 # or add a [[kv_namespaces]] block to a local, untracked config
-npx wrangler deploy
+npx wrangler deploy --config <that-config>
 ```
+
+> **Don't run bare `npx wrangler deploy` against a Worker the GitHub Actions
+> workflow manages.** `wrangler.toml` in this repo intentionally has no
+> `CONFIG_KV` binding — the workflow injects one into a temporary config at
+> deploy time. Deploying the bare config removes the binding from the live
+> Worker (`--keep-vars` preserves vars, not bindings), and every route starts
+> returning `500` until the next workflow run repairs it. There is no local
+> `deploy` npm script for this reason — always deploy through the workflow,
+> or explicitly pass `--config` to a file that includes the binding.
 
 ### Local development
 

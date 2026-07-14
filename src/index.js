@@ -1,6 +1,7 @@
 const GITHUB_API = "https://api.github.com";
 const DEFAULT_MANIFEST_CACHE_TTL_SECONDS = 6 * 60 * 60;
 const DEFAULT_DOWNLOAD_CACHE_TTL_SECONDS = 24 * 60 * 60;
+const STATUS_REMOTE_CHECK_CACHE_TTL_SECONDS = 60;
 
 function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
@@ -304,12 +305,42 @@ async function handleDownload(originUrl, pathParts, config, headers, env, bypass
     return new Response(assetResp.body, {
       status: 200,
       headers: {
-        "content-type": "application/zip",
+        "content-type": zipAsset.content_type || "application/zip",
         "content-disposition": `attachment; filename="${filename}"`,
         "cache-control": `public, max-age=${downloadTtl}`,
       },
     });
   }, bypassCache, ctx);
+}
+
+async function handleStatusJson(originUrl, slug, config, env, includeRemoteChecks, bypassCache, ctx) {
+  if (!includeRemoteChecks) {
+    const pluginStatus = await buildPluginStatus(originUrl, slug, config, env, false);
+    return json(pluginStatus, pluginStatus.healthy ? 200 : 503);
+  }
+
+  // Remote checks make several authenticated GitHub API calls per request; cache
+  // briefly so a known slug can't be hammered to burn the PAT's rate limit. Unlike
+  // withCache(), this caches 503s too — a degraded route is exactly the case
+  // where repeated hits are cheapest to trigger and most worth capping, and 60s
+  // of staleness on a diagnostic endpoint isn't misleading.
+  const cache = caches.default;
+  const cacheKey = new Request(`${originUrl.origin}/${slug}/status.json`, { method: "GET" });
+
+  if (!bypassCache) {
+    const cached = await cache.match(cacheKey);
+    if (cached) {
+      return cached;
+    }
+  }
+
+  const pluginStatus = await buildPluginStatus(originUrl, slug, config, env, true);
+  const response = json(pluginStatus, pluginStatus.healthy ? 200 : 503, {
+    "cache-control": `public, max-age=${STATUS_REMOTE_CHECK_CACHE_TTL_SECONDS}`,
+  });
+
+  ctx.waitUntil(cache.put(cacheKey, response.clone()));
+  return response;
 }
 
 function buildPluginSummary(originUrl, slug, config, env) {
@@ -489,11 +520,16 @@ export default {
       return json({ error: "Plugin routing not found." }, 404);
     }
 
+    const bypassState = getCacheBypassState(env, request, url);
+    if (bypassState.error) {
+      return json({ error: bypassState.error }, bypassState.status || 403);
+    }
+
+    const bypassCache = bypassState.bypassCache;
+
     if (parsed.action === "status.json") {
       const includeRemoteChecks = url.searchParams.get("check") !== "0";
-      const pluginStatus = await buildPluginStatus(url, parsed.slug, config, env, includeRemoteChecks);
-      const statusCode = pluginStatus.healthy ? 200 : 503;
-      return json(pluginStatus, statusCode);
+      return handleStatusJson(url, parsed.slug, config, env, includeRemoteChecks, bypassCache, ctx);
     }
 
     if (config.isPrivate && (!config.tokenKey || !env[config.tokenKey])) {
@@ -504,12 +540,6 @@ export default {
     }
 
     const headers = buildGithubHeaders(config, env);
-    const bypassState = getCacheBypassState(env, request, url);
-    if (bypassState.error) {
-      return json({ error: bypassState.error }, bypassState.status || 403);
-    }
-
-    const bypassCache = bypassState.bypassCache;
 
     if (parsed.action === "updates.json") {
       return handleUpdatesJson(url, config, headers, parsed.slug, env, bypassCache, ctx);

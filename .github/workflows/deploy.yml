@@ -4,6 +4,7 @@ name: Deploy Worker
   push:
     branches:
       - main
+      - development
   workflow_dispatch: # Allows you to manually trigger a deploy from the GitHub UI
 
 jobs:
@@ -74,37 +75,23 @@ jobs:
           echo "$ROUTES_JSON" | jq -c '.' > /tmp/routes.json
           npx wrangler kv key put routes --namespace-id "${{ steps.kv.outputs.id }}" --remote --path /tmp/routes.json
 
-      - name: Sync GITHUB_PAT_DEFAULT worker secret
-        if: steps.secret-check.outputs.skip == 'false'
-        env:
-          GITHUB_PAT_DEFAULT: ${{ secrets.GITHUB_PAT_DEFAULT }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${GITHUB_PAT_DEFAULT:-}" ]]; then
-            echo "::notice::GITHUB_PAT_DEFAULT repository secret is not set; public routes will call the GitHub API unauthenticated and may be rate-limited."
-            exit 0
-          fi
-          printf '%s' "$GITHUB_PAT_DEFAULT" | npx wrangler secret put GITHUB_PAT_DEFAULT
-
       - name: Build temporary deploy config with bindings
         if: steps.secret-check.outputs.skip == 'false'
         env:
           MANIFEST_CACHE_TTL_SECONDS: ${{ vars.MANIFEST_CACHE_TTL_SECONDS }}
           DOWNLOAD_CACHE_TTL_SECONDS: ${{ vars.DOWNLOAD_CACHE_TTL_SECONDS }}
           ALLOW_CACHE_BYPASS: ${{ vars.ALLOW_CACHE_BYPASS }}
-          CACHE_BYPASS_TOKEN: ${{ secrets.CACHE_BYPASS_TOKEN }}
         run: |
           set -euo pipefail
           cp wrangler.toml .wrangler-ci.toml
           printf '\n[[kv_namespaces]]\nbinding = "CONFIG_KV"\nid = "%s"\n' "${{ steps.kv.outputs.id }}" >> .wrangler-ci.toml
 
-          # Optional operational vars, only if the matching repo var/secret is set.
+          # Optional operational vars, only if the matching repo variable is set.
           # Unset ones fall through to the code defaults / whatever --keep-vars preserves.
           VARS_BLOCK=""
           [[ -n "${MANIFEST_CACHE_TTL_SECONDS:-}" ]] && VARS_BLOCK+="MANIFEST_CACHE_TTL_SECONDS = \"${MANIFEST_CACHE_TTL_SECONDS}\"\n"
           [[ -n "${DOWNLOAD_CACHE_TTL_SECONDS:-}" ]] && VARS_BLOCK+="DOWNLOAD_CACHE_TTL_SECONDS = \"${DOWNLOAD_CACHE_TTL_SECONDS}\"\n"
           [[ -n "${ALLOW_CACHE_BYPASS:-}" ]] && VARS_BLOCK+="ALLOW_CACHE_BYPASS = \"${ALLOW_CACHE_BYPASS}\"\n"
-          [[ -n "${CACHE_BYPASS_TOKEN:-}" ]] && VARS_BLOCK+="CACHE_BYPASS_TOKEN = \"${CACHE_BYPASS_TOKEN}\"\n"
 
           if [[ -n "$VARS_BLOCK" ]]; then
             printf '\n[vars]\n%b' "$VARS_BLOCK" >> .wrangler-ci.toml
@@ -113,3 +100,23 @@ jobs:
       - name: Deploy with Wrangler
         if: steps.secret-check.outputs.skip == 'false'
         run: npx wrangler deploy --config .wrangler-ci.toml --keep-vars
+
+      - name: Sync worker secrets
+        if: steps.secret-check.outputs.skip == 'false'
+        env:
+          GITHUB_PAT_DEFAULT: ${{ secrets.GITHUB_PAT_DEFAULT }}
+          CACHE_BYPASS_TOKEN: ${{ secrets.CACHE_BYPASS_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Runs after the deploy step so the Worker already exists — wrangler
+          # secret put against a not-yet-deployed Worker is version-dependent
+          # (prompt, draft creation, or hard error) and not safe to rely on in CI.
+          if [[ -n "${GITHUB_PAT_DEFAULT:-}" ]]; then
+            printf '%s' "$GITHUB_PAT_DEFAULT" | npx wrangler secret put GITHUB_PAT_DEFAULT
+          else
+            echo "::notice::GITHUB_PAT_DEFAULT repository secret is not set; public routes will call the GitHub API unauthenticated and may be rate-limited."
+          fi
+
+          if [[ -n "${CACHE_BYPASS_TOKEN:-}" ]]; then
+            printf '%s' "$CACHE_BYPASS_TOKEN" | npx wrangler secret put CACHE_BYPASS_TOKEN
+          fi

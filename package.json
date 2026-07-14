@@ -4,8 +4,7 @@
 	"private": true,
 	"description": "Cloudflare Worker proxy for WordPress updates metadata via GitHub API",
 	"scripts": {
-		"dev": "wrangler dev",
-		"deploy": "wrangler deploy"
+		"dev": "wrangler dev"
 	},
 	"devDependencies": {
 		"wrangler": "^4.25.0"
