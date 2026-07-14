@@ -44,10 +44,17 @@ The script will:
 
 - Verify local prerequisites (`npx`, Wrangler, `jq`) and Cloudflare authentication.
 - Confirm Worker context and deployment visibility.
-- Validate or create the `CONFIG_KV` namespace workflow (without guessing IDs).
-- Show existing route keys before any update.
-- Prompt for slug, owner, repository, and a hidden GitHub PAT.
-- Push the secret, merge the route config, and verify the result.
+- Let you pick a worker-specific KV namespace title (default: `<worker-name>_CONFIG_KV`).
+- Use `CONFIG_KV` as the Worker binding name while keeping the namespace title unique in Cloudflare.
+- Read/write the `routes` key using **remote** KV operations (Cloudflare account state, not local preview state).
+- Provide a prompt-based menu to review routes, inspect slug config, and register/update repo mappings.
+- Optionally register/update GitHub PAT secrets for private repos.
+- Optionally deploy/update the live Worker in Cloudflare using a temporary runtime config (without committing account IDs).
+
+Important input rule:
+
+- `owner` should be org/user only (example: `webmultipliers`).
+- `repo` should be repository name only (example: `plugin-for-wordpress`), not `owner/repo`.
 
 ## 2) Authenticate Wrangler
 
@@ -62,6 +69,8 @@ This opens a browser and links Wrangler to your Cloudflare account.
 Create a Cloudflare KV namespace (for example `WP_UPDATES_CONFIG`) and bind it to this Worker as `CONFIG_KV`.
 
 Bind it outside this repository (Cloudflare Dashboard or Wrangler command line) so no account-specific IDs are committed.
+
+If you use `./setup.sh`, this is handled interactively for each run and can deploy with runtime binding via temporary config.
 
 ## 4) Add routing map to KV
 
@@ -85,6 +94,8 @@ Create a KV key named `routes` with JSON content like:
 ```
 
 You can manage this from the Cloudflare dashboard without changing repository code.
+
+Note for Wrangler v4 CLI usage outside the setup script: use `--remote` for KV key operations when you intend to read/write Cloudflare account KV.
 
 ## 5) Store secrets securely
 
