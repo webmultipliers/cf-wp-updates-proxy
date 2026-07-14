@@ -4,21 +4,6 @@ Cloudflare Worker that proxies GitHub release metadata for WordPress update chec
 
 This worker supports multiple plugins (public and private) using a routing map stored in Cloudflare KV.
 
-## Status checklist
-
-- [x] Worker supports slug-based multi-plugin routing.
-- [x] Routing is loaded dynamically from Cloudflare KV key `routes`.
-- [x] Private/public plugin handling is supported via `tokenKey` and `isPrivate`.
-- [x] Download URLs are rewritten to Worker-managed `/download/...` routes.
-- [x] Edge caching is enabled for manifests and download redirects.
-- [x] Optional cache bypass is implemented.
-- [x] Optional token-protected bypass is implemented.
-- [x] GitHub Actions deploy workflow is included (`.github/workflows/deploy.yml`).
-- [x] Repository config kept clean (no KV IDs or secrets committed).
-- [ ] Create the KV namespace and add the `routes` JSON.
-- [ ] Add required Cloudflare/GitHub secrets.
-- [ ] Run `npx wrangler deploy` for first deployment.
-
 ## Project structure
 
 - `src/index.js`: Worker entrypoint and proxy logic.
@@ -31,30 +16,46 @@ This worker supports multiple plugins (public and private) using a routing map s
 npm install
 ```
 
-## Recommended: interactive setup script
+## Recommended: operational CLI
 
-Use the hardened setup script to run pre-flight checks and safely configure a new plugin route without manually editing live KV JSON.
+Use the command-driven CLI for repeatable remote operations against Cloudflare.
 
 ```bash
-chmod +x setup.sh
-./setup.sh
+npm run cli -- --help
 ```
 
-The script will:
+Primary commands:
 
-- Verify local prerequisites (`npx`, Wrangler, `jq`) and Cloudflare authentication.
-- Confirm Worker context and deployment visibility.
-- Let you pick a worker-specific KV namespace title (default: `<worker-name>_CONFIG_KV`).
-- Use `CONFIG_KV` as the Worker binding name while keeping the namespace title unique in Cloudflare.
-- Read/write the `routes` key using **remote** KV operations (Cloudflare account state, not local preview state).
-- Provide a prompt-based menu to review routes, inspect slug config, and register/update repo mappings.
-- Optionally register/update GitHub PAT secrets for private repos.
-- Optionally deploy/update the live Worker in Cloudflare using a temporary runtime config (without committing account IDs).
+```bash
+# One-time bootstrap: ensure namespace, initialize routes key, deploy safely
+npm run bootstrap
 
-Important input rule:
+# Health/config check
+npm run doctor
 
-- `owner` should be org/user only (example: `webmultipliers`).
-- `repo` should be repository name only (example: `plugin-for-wordpress`), not `owner/repo`.
+# Deploy while preserving vars and CONFIG_KV binding
+npm run cli -- worker deploy --create-namespace
+
+# Update a private plugin route (fails if token secret missing by default)
+npm run cli -- routes upsert fouanalytics webmultipliers fouanalytics-for-wordpress --private
+
+# Add or rotate a worker secret
+npm run cli -- secrets put GITHUB_PAT_FOUANALYTICS
+
+# List and inspect routes
+npm run cli -- routes list
+npm run cli -- routes get fouanalytics
+```
+
+The CLI script is in `bin/proxy-cli.sh` and supports:
+
+- `worker doctor` (alias `worker check`): validates auth, namespace resolution, and routes JSON integrity.
+- `worker bootstrap` (alias `worker init`): creates/resolves namespace, initializes `routes`, deploys with runtime binding.
+- `worker deploy` (alias `worker apply`): deploys with `--keep-vars` and injects CONFIG_KV binding when needed.
+- `routes list|get|upsert` (aliases `ls|show|set`): manages route mappings in remote KV.
+- `secrets put` (alias `secrets set`): updates Worker secrets on the correct Worker name.
+
+`setup.sh` is now only a launcher to `bin/proxy-cli.sh` (no interactive legacy wizard).
 
 ## 2) Authenticate Wrangler
 
@@ -70,7 +71,7 @@ Create a Cloudflare KV namespace (for example `WP_UPDATES_CONFIG`) and bind it t
 
 Bind it outside this repository (Cloudflare Dashboard or Wrangler command line) so no account-specific IDs are committed.
 
-If you use `./setup.sh`, this is handled interactively for each run and can deploy with runtime binding via temporary config.
+If you use `./setup.sh worker bootstrap --create-namespace`, this is handled as a command-driven flow and can deploy with runtime binding via temporary config.
 
 ## 4) Add routing map to KV
 
@@ -95,7 +96,7 @@ Create a KV key named `routes` with JSON content like:
 
 You can manage this from the Cloudflare dashboard without changing repository code.
 
-Note for Wrangler v4 CLI usage outside the setup script: use `--remote` for KV key operations when you intend to read/write Cloudflare account KV.
+Note for Wrangler v4 CLI usage outside this CLI: use `--remote` for KV key operations when you intend to read/write Cloudflare account KV.
 
 ## 5) Store secrets securely
 

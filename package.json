@@ -5,7 +5,10 @@
 	"description": "Cloudflare Worker proxy for WordPress updates metadata via GitHub API",
 	"scripts": {
 		"dev": "wrangler dev",
-		"deploy": "wrangler deploy"
+		"deploy": "bash ./bin/proxy-cli.sh worker deploy",
+		"cli": "bash ./bin/proxy-cli.sh",
+		"bootstrap": "bash ./bin/proxy-cli.sh --create-namespace worker bootstrap",
+		"doctor": "bash ./bin/proxy-cli.sh worker doctor"
 	},
 	"devDependencies": {
 		"wrangler": "^4.25.0"
