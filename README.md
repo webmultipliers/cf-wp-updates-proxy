@@ -4,6 +4,21 @@ Cloudflare Worker that proxies GitHub release metadata for WordPress update chec
 
 This worker supports multiple plugins (public and private) using a routing map stored in Cloudflare KV.
 
+## Status checklist
+
+- [x] Worker supports slug-based multi-plugin routing.
+- [x] Routing is loaded dynamically from Cloudflare KV key `routes`.
+- [x] Private/public plugin handling is supported via `tokenKey` and `isPrivate`.
+- [x] Download URLs are rewritten to Worker-managed `/download/...` routes.
+- [x] Edge caching is enabled for manifests and download redirects.
+- [x] Optional cache bypass is implemented.
+- [x] Optional token-protected bypass is implemented.
+- [x] GitHub Actions deploy workflow is included (`.github/workflows/deploy.yml`).
+- [x] Repository config kept clean (no KV IDs or secrets committed).
+- [ ] Create the KV namespace and add the `routes` JSON.
+- [ ] Add required Cloudflare/GitHub secrets.
+- [ ] Run `npx wrangler deploy` for first deployment.
+
 ## Project structure
 
 - `src/index.js`: Worker entrypoint and proxy logic.
@@ -15,6 +30,24 @@ This worker supports multiple plugins (public and private) using a routing map s
 ```bash
 npm install
 ```
+
+## Recommended: interactive setup script
+
+Use the hardened setup script to run pre-flight checks and safely configure a new plugin route without manually editing live KV JSON.
+
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+The script will:
+
+- Verify local prerequisites (`npx`, Wrangler, `jq`) and Cloudflare authentication.
+- Confirm Worker context and deployment visibility.
+- Validate or create the `CONFIG_KV` namespace workflow (without guessing IDs).
+- Show existing route keys before any update.
+- Prompt for slug, owner, repository, and a hidden GitHub PAT.
+- Push the secret, merge the route config, and verify the result.
 
 ## 2) Authenticate Wrangler
 
@@ -28,14 +61,7 @@ This opens a browser and links Wrangler to your Cloudflare account.
 
 Create a Cloudflare KV namespace (for example `WP_UPDATES_CONFIG`) and bind it to this Worker as `CONFIG_KV`.
 
-In `wrangler.toml`, set your real namespace ID:
-
-```toml
-[[kv_namespaces]]
-binding = "CONFIG_KV"
-id = "YOUR_KV_NAMESPACE_ID"
-preview_id = "YOUR_KV_NAMESPACE_ID"
-```
+Bind it outside this repository (Cloudflare Dashboard or Wrangler command line) so no account-specific IDs are committed.
 
 ## 4) Add routing map to KV
 
@@ -100,6 +126,31 @@ Example:
 
 ```text
 https://cf-wp-updates-proxy.<your-subdomain>.workers.dev/my-private-plugin/updates.json
+```
+
+## 8) Cache behavior
+
+This Worker uses Cloudflare Cache API to reduce GitHub API traffic:
+
+- `/<slug>/updates.json` responses are cached at the edge.
+- `/<slug>/download/<tag>/<filename>` redirect responses are cached at the edge.
+
+Optional environment variables (set as Worker vars) control TTL:
+
+- `MANIFEST_CACHE_TTL_SECONDS` (default: `21600`, 6 hours)
+- `DOWNLOAD_REDIRECT_CACHE_TTL_SECONDS` (default: `900`, 15 minutes)
+
+Optional cache bypass for testing:
+
+- `ALLOW_CACHE_BYPASS` (default: `false`)
+- When set to `true`, add `?refresh=1` (or `?no_cache=1`) to bypass cache for that request.
+- `CACHE_BYPASS_TOKEN` (optional): if set, bypass requests must include header `x-cache-bypass-token` with this exact value.
+
+Example bypass request with token:
+
+```bash
+curl -H "x-cache-bypass-token: <your-token>" \
+  "https://cf-wp-updates-proxy.<your-subdomain>.workers.dev/my-private-plugin/updates.json?refresh=1"
 ```
 
 ## GitHub Actions deployment
