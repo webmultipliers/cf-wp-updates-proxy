@@ -4,6 +4,7 @@ name: Deploy Worker
   push:
     branches:
       - main
+      - development
   workflow_dispatch: # Allows you to manually trigger a deploy from the GitHub UI
 
 jobs:

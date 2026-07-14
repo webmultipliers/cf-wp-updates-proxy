@@ -6,10 +6,10 @@ else. All configuration — which repos map to which slugs, tokens, cache
 TTLs — lives in Cloudflare KV, Worker secrets, and Worker vars. The source in
 `src/` is never edited to configure a deployment.
 
-This repository is a GitHub template. Click "Use this template," set a
-handful of repository secrets/variables, and push — the deploy workflow
-provisions the KV namespace and seeds its routing config for you; no manual
-Cloudflare dashboard step is required.
+This repository is designed to be forked. Fork it, set a handful of
+repository secrets/variables, and push — the deploy workflow provisions the
+KV namespace and seeds its routing config for you; no manual Cloudflare
+dashboard step is required.
 
 ## Behavior contract
 
@@ -95,7 +95,7 @@ curl -H "x-cache-bypass-token: <token>" \
 Every piece of configuration lives in this repository's GitHub Actions
 secrets/variables (Settings → Secrets and variables → Actions) — never in
 `src/` or `wrangler.toml`. The deploy workflow re-syncs KV and the default
-token from these on every push to `main`.
+token from these on every push to your deployment branch.
 
 ### Repository variables
 
@@ -117,7 +117,7 @@ token from these on every push to `main`.
 | `CACHE_BYPASS_TOKEN` | no | If set, auto-synced to the Worker's `CACHE_BYPASS_TOKEN` secret on every deploy and required as the `x-cache-bypass-token` header on bypass requests. Stored as a repo secret (not a variable) since it functions as a credential — the Worker reads it the same way regardless of whether it arrives as a var or a secret. |
 
 If `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID` aren't set, the workflow
-exits cleanly with a notice instead of failing — so the template deploys
+exits cleanly with a notice instead of failing — so a new fork deploys
 without a red X before you've configured anything. Any repo variable/secret
 left unset simply falls through to the Worker's built-in default.
 
@@ -191,14 +191,16 @@ clients.
 
 ## Deployment
 
-**Template flow (recommended, no Cloudflare dashboard step required):**
+**Fork flow (recommended, no Cloudflare dashboard step required):**
 
-1. Click "Use this template" to create your own repository.
-2. In the new repo's Settings → Secrets and variables → Actions, set:
+1. Fork this repository.
+2. In your fork's Settings → Secrets and variables → Actions, set:
    - Secrets: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and
      (recommended) `GITHUB_PAT_DEFAULT`
    - Variables: `ROUTES_JSON` (your routing map — see schema above)
-3. Push to `main`. `.github/workflows/deploy.yml` then, on every run:
+3. Push to your fork's default deployment branch (`development` or `main` by
+  default in this workflow), or run the workflow manually via
+  `workflow_dispatch`. `.github/workflows/deploy.yml` then, on every run:
    - resolves or creates the `CONFIG_KV` namespace (titled
      `<repo-name>-CONFIG_KV`) — no id to look up or copy anywhere
    - writes `ROUTES_JSON` to its `routes` key
@@ -214,8 +216,24 @@ clients.
    names your routes will reference).
 
 If `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID` aren't set yet, the
-workflow exits cleanly with a notice instead of failing, so the template
+workflow exits cleanly with a notice instead of failing, so a new fork
 deploys without a red X before you've configured anything.
+
+## Staying updated
+
+This distribution model is pull-based: upstream updates are available to your
+fork when you sync it.
+
+1. Open your fork on GitHub.
+2. Use the **Sync fork** button when GitHub shows your fork is behind.
+3. The sync commit lands on your default branch and triggers deploy.
+
+Because deployment identity lives outside git (repo secrets/variables, Worker
+secrets, and KV data), syncing code from upstream does not overwrite your
+deployment credentials.
+
+For breaking changes (for example, route schema changes or renamed env vars),
+check this repo's release notes and `CHANGELOG.md` before syncing.
 
 **Manual alternative** (bypassing the workflow entirely):
 
