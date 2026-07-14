@@ -1,0 +1,17 @@
+# Copy to .dev.vars for local `wrangler dev` (never commit .dev.vars).
+
+# Shared token used for any route without its own tokenKey. Strongly
+# recommended even for all-public deployments — avoids anonymous GitHub API
+# rate limits shared across all Workers egress IPs.
+GITHUB_PAT_DEFAULT=ghp_placeholder
+
+# Per-route token, named by that route's "tokenKey" in the routes JSON.
+GITHUB_PAT_EXAMPLE_PRIVATE_PLUGIN=ghp_placeholder
+
+# Optional cache tuning.
+MANIFEST_CACHE_TTL_SECONDS=21600
+DOWNLOAD_CACHE_TTL_SECONDS=86400
+
+# Optional cache bypass for testing (?refresh=1).
+ALLOW_CACHE_BYPASS=true
+CACHE_BYPASS_TOKEN=local-dev-token

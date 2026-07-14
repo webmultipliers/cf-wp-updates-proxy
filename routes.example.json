@@ -1,0 +1,14 @@
+{
+  "example-plugin": {
+    "owner": "example-org",
+    "repo": "example-plugin",
+    "tokenKey": null,
+    "isPrivate": false
+  },
+  "example-private-plugin": {
+    "owner": "example-org",
+    "repo": "example-private-plugin",
+    "tokenKey": "GITHUB_PAT_EXAMPLE_PRIVATE_PLUGIN",
+    "isPrivate": true
+  }
+}
