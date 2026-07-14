@@ -107,6 +107,14 @@ function getCacheBypassState(env, request, url) {
   };
 }
 
+function isCacheableStatus(status) {
+  if (status >= 200 && status < 300) {
+    return true;
+  }
+
+  return status === 301 || status === 302 || status === 307 || status === 308;
+}
+
 async function withCache(cacheKey, ttlSeconds, computeResponse, bypassCache = false) {
   const cache = caches.default;
   if (!bypassCache) {
@@ -117,7 +125,7 @@ async function withCache(cacheKey, ttlSeconds, computeResponse, bypassCache = fa
   }
 
   const response = await computeResponse();
-  if (!bypassCache && response.ok) {
+  if (!bypassCache && isCacheableStatus(response.status)) {
     const cloned = response.clone();
     cloned.headers.set("cache-control", `public, max-age=${ttlSeconds}`);
     await cache.put(cacheKey, cloned);
@@ -207,7 +215,11 @@ async function handleDownload(originUrl, pathParts, config, headers, env, bypass
     const releaseResp = await fetchJson(releaseByTagUrl, headers);
 
     if (!releaseResp.ok) {
-      return json({ error: "Release not found", details: releaseResp.text }, 404);
+      if (releaseResp.status === 404) {
+        return json({ error: "Release not found", details: releaseResp.text }, 404);
+      }
+
+      return json({ error: "Failed to fetch release by tag", details: releaseResp.text }, releaseResp.status);
     }
 
     const releaseData = releaseResp.data;
