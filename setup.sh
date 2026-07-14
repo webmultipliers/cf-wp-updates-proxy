@@ -163,6 +163,8 @@ if [[ -z "$WORKER_NAME" ]]; then
 fi
 echo -e "${GREEN}OK:${RESET} Worker name: ${BOLD}$WORKER_NAME${RESET}"
 
+DEFAULT_NAMESPACE_TITLE="${WORKER_NAME}_CONFIG_KV"
+
 print_header "2) What's your Worker ID/URL?"
 
 read -r -p "Worker URL (or ID note) (example: https://my-worker.my-subdomain.workers.dev). Leave blank to skip: " WORKER_URL
@@ -189,29 +191,48 @@ if [[ -n "$NAMESPACE_ID" ]]; then
   echo -e "${GREEN}OK:${RESET} CONFIG_KV binding found with id: ${CYAN}$NAMESPACE_ID${RESET}"
 else
   echo -e "${YELLOW}Missing KV setup:${RESET} CONFIG_KV is not bound in wrangler.toml"
+  echo "Note: CONFIG_KV is the Worker binding name."
+  echo "The Cloudflare KV namespace title can be unique per worker."
   echo "No repository files will be modified. We will use a namespace id only for this setup session."
 
-  EXISTING_ID="$(get_namespace_id_by_title "CONFIG_KV" || true)"
+  read -r -p "KV namespace title to use/create [${DEFAULT_NAMESPACE_TITLE}]: " NAMESPACE_TITLE
+  NAMESPACE_TITLE="$(trim "$NAMESPACE_TITLE")"
+  if [[ -z "$NAMESPACE_TITLE" ]]; then
+    NAMESPACE_TITLE="$DEFAULT_NAMESPACE_TITLE"
+  fi
+
+  EXISTING_ID="$(get_namespace_id_by_title "$NAMESPACE_TITLE" || true)"
+
+  # Backward-compatible fallback for older setups.
+  if [[ -z "$EXISTING_ID" && "$NAMESPACE_TITLE" != "CONFIG_KV" ]]; then
+    LEGACY_ID="$(get_namespace_id_by_title "CONFIG_KV" || true)"
+    if [[ -n "$LEGACY_ID" ]]; then
+      echo -e "${YELLOW}Found legacy namespace title CONFIG_KV:${RESET} $LEGACY_ID"
+      if ask_yes_no "Use legacy CONFIG_KV namespace for this run?"; then
+        EXISTING_ID="$LEGACY_ID"
+      fi
+    fi
+  fi
 
   if [[ -n "$EXISTING_ID" ]]; then
-    echo "Found existing CONFIG_KV-like namespace id: $EXISTING_ID"
+    echo "Found existing namespace '$NAMESPACE_TITLE' with id: $EXISTING_ID"
     if ask_yes_no "Use this namespace id for this setup run?"; then
       NAMESPACE_ID="$EXISTING_ID"
     fi
   fi
 
   if [[ -z "$NAMESPACE_ID" ]]; then
-    if ask_yes_no "Create CONFIG_KV namespace now?"; then
-      CREATE_OUTPUT="$(npx --yes wrangler kv namespace create "CONFIG_KV" 2>&1 || true)"
+    if ask_yes_no "Create namespace '$NAMESPACE_TITLE' now?"; then
+      CREATE_OUTPUT="$(npx --yes wrangler kv namespace create "$NAMESPACE_TITLE" 2>&1 || true)"
       NAMESPACE_ID="$(echo "$CREATE_OUTPUT" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
 
       # If create output did not include an id (or namespace already existed), resolve by listing.
       if [[ -z "$NAMESPACE_ID" ]]; then
-        NAMESPACE_ID="$(get_namespace_id_by_title "CONFIG_KV" || true)"
+        NAMESPACE_ID="$(get_namespace_id_by_title "$NAMESPACE_TITLE" || true)"
       fi
 
       if [[ -z "$NAMESPACE_ID" ]]; then
-        echo -e "${RED}ERROR:${RESET} Could not resolve CONFIG_KV namespace id after create attempt."
+        echo -e "${RED}ERROR:${RESET} Could not resolve namespace id after create attempt."
         echo "Create output was:"
         echo "$CREATE_OUTPUT"
         echo "Run manually: npx wrangler kv namespace list"
@@ -242,7 +263,7 @@ fi
 
 load_routes() {
   local raw
-  raw="$(npx --yes wrangler kv key get "routes" --namespace-id "$NAMESPACE_ID" 2>/dev/null || true)"
+  raw="$(npx --yes wrangler kv key get "routes" --namespace-id "$NAMESPACE_ID" --remote 2>/dev/null || true)"
   raw="$(trim "$raw")"
 
   if [[ -z "$raw" || "$raw" == "null" || "$raw" == "Value not found" ]]; then
@@ -270,7 +291,7 @@ load_routes() {
 save_routes() {
   local compact
   compact="$(echo "$ROUTES_JSON" | jq -c '.')"
-  npx --yes wrangler kv key put "routes" "$compact" --namespace-id "$NAMESPACE_ID" >/dev/null
+  npx --yes wrangler kv key put "routes" "$compact" --namespace-id "$NAMESPACE_ID" --remote >/dev/null
 }
 
 show_routes_summary() {
@@ -307,6 +328,17 @@ register_or_update_slug() {
   slug="$(trim "$slug")"
   owner="$(trim "$owner")"
   repo="$(trim "$repo")"
+
+  if [[ "$repo" == */* ]]; then
+    if [[ "$repo" == "$owner/"* ]]; then
+      echo -e "${YELLOW}WARN:${RESET} Repo should be only the repository name. Auto-correcting '$repo' -> '${repo#*/}'."
+      repo="${repo#*/}"
+    else
+      echo -e "${RED}ERROR:${RESET} Repo must be repository name only (no slash)."
+      echo "Example: owner='webmultipliers' repo='fouanalytics-for-wordpress'"
+      return
+    fi
+  fi
 
   if [[ -z "$slug" || -z "$owner" || -z "$repo" ]]; then
     echo -e "${RED}ERROR:${RESET} slug, owner, and repo are required."

@@ -30,7 +30,7 @@ function buildGithubHeaders(config, env) {
 function parseRoute(url) {
   const pathParts = url.pathname.split("/").filter(Boolean);
   if (pathParts.length < 2) {
-    return { error: "Invalid request format. Expected /<slug>/<action>" };
+    return null;
   }
 
   const slug = pathParts[0];
@@ -252,10 +252,22 @@ export default {
     }
 
     const url = new URL(request.url);
+    if (url.pathname === "/") {
+      return json(
+        {
+          ok: true,
+          service: "cf-wp-updates-proxy",
+          message: "Use /<slug>/updates.json or /<slug>/download/<tag>/<filename>",
+        },
+        200,
+      );
+    }
+
     const parsed = parseRoute(url);
 
-    if (parsed.error) {
-      return json({ error: parsed.error }, 400);
+    // Treat malformed paths as not found to avoid noisy format errors.
+    if (!parsed) {
+      return json({ error: "Not found." }, 404);
     }
 
     const routingResult = await getRoutingMap(env);
