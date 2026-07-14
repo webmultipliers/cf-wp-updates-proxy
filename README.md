@@ -121,6 +121,20 @@ Wrangler outputs your Worker URL, for example:
 
 ## 7) Query the proxy
 
+Service status endpoints:
+
+```text
+GET /
+GET /status
+GET /status.json
+GET /<slug>/status.json
+```
+
+- `/` and `/status` return an HTML status page with route health and delivery details.
+- `/status.json` returns a machine-readable service report.
+- `/<slug>/status.json` returns a machine-readable report for one plugin route.
+- Add `?check=0` to use preflight-only checks (no GitHub API calls).
+
 Manifest endpoint:
 
 ```text
